@@ -1,6 +1,6 @@
 -- ServerScriptService/main.server.luau
 -- Explicit server BOOT ORDER. Each shared dependency is fully resolved before the next, so systems
--- never race a half-ready singleton. Order: packages -> framework -> game systems.
+-- never race a half-ready singleton. Order: packages -> game systems.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Each stage prints so the boot is OBSERVABLE in the Output — if it ever stalls, the last [boot] line
@@ -8,17 +8,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local bootT0 = os.clock()
 local function boot(msg: string) print(("[boot +%.1fs] %s"):format(os.clock() - bootT0, msg)) end
 
--- 1) PACKAGES — wait for the wally tree so anything that requires a package (profilestore, bytenet,
---    jecs, …) finds it. (Server has the tree at boot; WaitForChild is the explicit gate.)
-boot("1/4 waiting for Packages …")
+-- 1) PACKAGES — wait for the wally tree so anything that requires a package (jecs, blink, …) finds it.
+--    (Server has the tree at boot; WaitForChild is the explicit gate.)
+boot("1/3 waiting for Packages …")
 ReplicatedStorage:WaitForChild("Packages")
-boot("1/4 Packages ready")
-
--- 2) FRAMEWORK — initialize the imported data layer (the require runs Data._init(), which creates the
---    ProfileStore store) so a player profile load can never race the store's creation. (Data-layer
---    scope only; if the full framework is ever adopted, Framework.Initialize() would go here too.)
-boot("2/4 framework data layer …")
-require(ReplicatedStorage.Framework.Data)
+boot("1/3 Packages ready")
 
 -- (was CHRONO — REMOVED.) Chrono is gone from the project entirely.
 --    Two things killed it, in order:
@@ -33,14 +27,14 @@ require(ReplicatedStorage.Framework.Data)
 --    Enabled via Workspace.AuthorityMode = "Server" (auto-sets NextGenerationReplication,
 --    PlayerScriptsUseInputActionSystem, SignalBehavior=Deferred, StreamingEnabled, UseFixedSimulation).
 
--- 3) SYSTEMS — dependencies are ready; start the game loop. This also requires every system module,
+-- 2) SYSTEMS — dependencies are ready; start the game loop. This also requires every system module,
 --    which is where the Blink remotes (ServerNet) and any server-built ReplicatedStorage instances get
 --    created — so once start() returns, everything a client depends on EXISTS.
-boot("3/4 starting systems …")
+boot("2/3 starting systems …")
 local start = require(ReplicatedStorage.std.start)
 start(script.Parent:WaitForChild("systems"):GetChildren())
 
--- 4) SIGNAL CLIENTS — only now is the server fully built (remotes + instances + systems). Clients gate
+-- 3) SIGNAL CLIENTS — only now is the server fully built (remotes + instances + systems). Clients gate
 --    their own init on this flag so they never race a half-built server (the client-starts-first bug:
 --    a client touching a remote/instance the server hasn't created yet). A PERSISTENT instance, so a
 --    late joiner sees it immediately rather than needing a re-fired event.
@@ -48,4 +42,4 @@ local ready = Instance.new("BoolValue")
 ready.Name = "ServerReady"
 ready.Value = true
 ready.Parent = ReplicatedStorage
-boot("4/4 ServerReady set → clients may init")
+boot("3/3 ServerReady set → clients may init")

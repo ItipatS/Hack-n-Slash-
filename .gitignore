@@ -19,10 +19,5 @@
 # Kept locally for the Studio/dev copy; not part of the public portfolio repo.
 /docs/framework/
 
-# Imported VEIN framework — the game only uses Data/ (the ProfileStore wrapper), which IS tracked.
-# The rest (Session/Registry/Rodux/UI/Packets/…) is local reference, not part of this build.
-/src/Framework/*
-!/src/Framework/Data/
-
 # Claude Code tooling — skills, agents, local settings. Dev-only.
 /.claude/

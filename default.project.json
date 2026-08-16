@@ -19,10 +19,7 @@
       },
       "ClientSystems": {
         "$path": "src/ClientSystems"
-      },
-      "Framework": {
-          "$path": "src/Framework"
-        }
+      }
     },
     "ServerScriptService": {
       "$ignoreUnknownInstances": true,

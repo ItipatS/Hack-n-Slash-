@@ -1,6 +1,5 @@
 -- Logger — minimal leveled logger at ReplicatedStorage.Logger.
--- The imported Framework (Data/ProfileStore wrapper) requires this module, and the studio
--- convention is `Logger.*` over raw print/warn. Levels: debug (gated by Config.Debug.LOG_DEBUG),
+-- Convention is `Logger.*` over raw print/warn. Levels: debug (gated by Config.Debug.LOG_DEBUG),
 -- info/warn/error always through. Each takes one already-formatted string.
 --!strict
 
