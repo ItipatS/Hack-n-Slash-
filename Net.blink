@@ -1,0 +1,714 @@
+option ClientOutput = "src/std/ClientNet.luau"
+option ServerOutput = "src/ServerScriptService/ServerNet.luau"
+
+map state = { [string]: string }
+
+-- ── Hack&Slash pivot ─────────────────────────────────────────────────────────────
+-- Client → server: the local character's action state changed (enum in std/playerStates.luau:
+-- 0 idle, 1 walk, 2 run, 3 jump, 4 fall, 5 roll). Client-authoritative movement (CLAUDE.md) —
+-- the server stores {state, since} per player for combat rules (roll i-frames, attack gating);
+-- it validates OUTCOMES, not motion. Fired on TRANSITIONS only, so Reliable is cheap and drops
+-- would be unacceptable (a missed "roll ended" would leave permanent i-frames).
+event PlayerAction {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u8
+}
+
+-- Dense-slot delta chunk: i8 fixed-point deltas written in SLOT order starting at `base`,
+-- 3 i8 per slot (dx,dy,dz). NO per-mob id — slot = base + index/3, and the client maps
+-- slot→entity from the Spawn payload. This is the bulk of the mob-position bandwidth.
+struct DeltaChunk {
+    base: u16,
+    deltas: i8[],
+}
+
+struct TransformFull {
+    id: u32,
+    dp: vector<f32>,
+}
+
+struct MobState {
+    id: u32,
+    state: state,
+}
+
+struct MobSpawn {
+    id: u32,
+    slot: u16,    -- dense replication slot (zombies); 0 for UFOs (not in the delta stream)
+    pos: vector<f64>,
+    size: f32,    -- visual scale (1 = normal slime, larger = elite)
+    type: string,
+    tier: u8,     -- 0 normal, 1 elite, 2 boss (client labels bosses with a billboard)
+}
+
+struct Path {
+    id: u32,
+    from : u32,
+    to: u32,
+    speed: f32,
+    startTime: f64,  -- absolute GetServerTimeNow(); MUST be f64 (f32 ULP ~128s at 1.78e9)
+}
+
+-- Direct-chase intent: zombie homes on `target` (a player's character) at `speed`.
+-- Sent once on entering chase mode; client + server both steer toward the live,
+-- already-replicated target position each frame (no per-frame streaming).
+struct Chase {
+    id: u32,
+    target: Instance,
+    speed: f32,
+}
+
+event UpdateTransformDelta {
+    From: Server,
+    Type: Unreliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: DeltaChunk
+}
+
+event UpdateTransformFull {
+    From: Server,
+    Type: Reliable,    -- Must arrive to correct drift
+    Call: SingleSync, 
+    Poll: false,
+    Data: TransformFull[]
+}
+
+event Spawn {
+    From: Server,
+    Type: Reliable,
+    Call: ManySync,
+    Poll: false,
+    Data: MobSpawn[]
+}
+
+event UpdateMobState {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: MobState[]
+}
+
+event UpdateMobPath {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: Path[]
+}
+
+event UpdateMobChase {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: Chase[]
+}
+
+-- ── Combat / progression (Phase 2) ──────────────────────────────────────────────
+
+-- A bubble projectile. Formula motion: pos = origin + velocity*(GetServerTimeNow()-t0),
+-- computed on BOTH ends (no per-bubble streaming). Server sims it vs the spatial hash for
+-- authoritative damage; client just renders it for `life` seconds.
+struct BubbleFire {
+    id: u32,
+    origin: vector<f32>,
+    velocity: vector<f32>,
+    t0: f64,
+    life: f32,
+    color: vector<f32>,  -- r,g,b (0..1)
+    size: f32,           -- visual diameter
+    shape: u8?,          -- visual "lane": nil/0 = ball, 1 = ice cube (penguin). Secondaries omit it.
+}
+
+-- A dropped EXP orb. Static; Y already resolved to the floor by the server. `tier` drives
+-- the client visual (1=small green, 2=blue, 3=orange, 4=purple); the server derives value.
+struct ExpSpawn {
+    id: u32,
+    pos: vector<f32>,
+    tier: u8,
+}
+
+-- One upgrade choice. `id` is the offered index (1..N, up to 5 for boss/elite card packs).
+-- `kind`: 0=player stat, 2=weapon upgrade, 3=new weapon, 4=item. `weapon` is the registry id —
+-- a pet id (weapon card → 3D thumbnail) or an item id (item card → emoji badge), "" for stats.
+struct Card {
+    id: u8,
+    title: string,
+    desc: string,
+    kind: u8,
+    weapon: string,
+}
+
+-- Player's progression + survival for the HUD.
+struct StatsMsg {
+    level: u16,
+    xp: u32,
+    xpNext: u32,
+    hp: u16,
+    maxHp: u16,
+}
+
+-- Full derived player-stat sheet for the top-right STATS panel. Sent only when stats CHANGE
+-- (card pick / run reset / join) — not every HP tick (that's StatsMsg). Multipliers are 1.0 = base.
+struct StatSheetMsg {
+    maxHp: u16,
+    hpRegen: f32,    -- HP/sec
+    atk: f32,        -- overall damage multiplier (damageMult)
+    walkSpeed: f32,
+    crit: f32,       -- crit chance 0..1
+    critDmg: f32,    -- crit damage multiplier
+    pickup: f32,     -- pickup-range multiplier
+    haste: f32,      -- overall firing-speed multiplier
+    expMult: f32,    -- EXP-gain multiplier
+    tixRate: f32,    -- Tix-drop multiplier
+    atkSize: f32,    -- attack-size multiplier (items)
+    knock: f32,      -- knockback multiplier (items)
+    skillCd: f32,    -- skill-cooldown multiplier (items; >1 = slower)
+}
+event StatSheet {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: StatSheetMsg
+}
+
+struct GameOverMsg {
+    time: f32,    -- seconds survived
+    level: u16,
+}
+
+-- Server → all: current HP of every ELITE/BOSS mob (zombie + UFO), each tick. The set is tiny, so
+-- this is cheap. Client draws a floating health bar (std/mobBar). ManySync: syncMobs + syncUFO both
+-- listen and update whichever ids are theirs.
+struct MobHp {
+    id: u32,
+    hp: u16,
+    max: u16,
+}
+event MobHealth {
+    From: Server,
+    Type: Reliable,
+    Call: ManySync,
+    Poll: false,
+    Data: MobHp[]
+}
+
+-- Mobs that died this frame (client releases their visual). ManySync: zombies (syncMobs) and
+-- UFOs (syncUFO) both listen and release whichever ids are theirs.
+event Death {
+    From: Server,
+    Type: Reliable,
+    Call: ManySync,
+    Poll: false,
+    Data: u32[]
+}
+
+event FireBubble {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: BubbleFire[]
+}
+
+-- Bubbles the server retired EARLY (pierce used up) before their `life`. Client despawns them so
+-- pierce reads correctly (a 3-pierce bolt vanishes after 3 hits, not after `life`). Unreliable —
+-- a miss just lets it live out its life, no harm.
+event RemoveBubble {
+    From: Server,
+    Type: Unreliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u32[]
+}
+
+event SpawnExp {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: ExpSpawn[]
+}
+
+-- EXP orbs that were collected/removed (client despawns their visual).
+event RemoveExp {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u32[]
+}
+
+-- An upgrade offer: a set of cards + WHERE it came from. `source`: 0 = level up, 1 = boss/elite card
+-- pack (room for 2 = anvil, 3 = shop, ... later, each able to filter the card pool differently).
+struct Offer {
+    source: u8,
+    cards: Card[],
+}
+
+-- Server → one player: present an upgrade offer (4 cards on level-up, 3-5 from a card pack).
+event LevelUp {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: Offer
+}
+
+-- Client → server: the player picked card #index (1..N) of the current offer.
+event ChooseCard {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u8
+}
+
+-- Client → server: the player's current aim direction (unit, full 3D). The pet fires this
+-- way on its cooldown. Unreliable: latest aim wins, drops are fine.
+event Aim {
+    From: Client,
+    Type: Unreliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: vector<f32>
+}
+
+-- Client → server: activate a pet skill by id (server validates cooldown).
+event UseSkill {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u8
+}
+
+-- Server → one player: the run ended (HP hit 0).
+event GameOver {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: GameOverMsg
+}
+
+-- Client → server: PLAY. Joins the live round if one is running (and you haven't died this
+-- round), otherwise starts a fresh round at wave 1. A ghost (died this round) is ignored by the
+-- server until the round ends.
+event Restart {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u8
+}
+
+-- Client → server: switch to the OTHER place (showcase ⇄ real game). The server decides the target
+-- from its own game.PlaceId and TeleportAsyncs the player (safer than a client-side Teleport). Data unused.
+event SwitchPlace {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u8
+}
+
+-- Server → all: the current round just ended (the last living player fell → field wiped). Frees
+-- every ghost back to the menu so they can press Play to start the next round. ManySync: both the
+-- death/spectate screen (exit spectate) and the main menu (re-show) listen.
+event RoundOver {
+    From: Server,
+    Type: Reliable,
+    Call: ManySync,
+    Poll: false,
+    Data: u8
+}
+
+-- One equipped weapon: id + its current level (the pet billboard shows "Name Lv.X").
+struct WeaponInfo {
+    id: string,
+    level: u8,
+}
+
+-- Server → one player: the player's EQUIPPED weapons (one pet per weapon), id + level. ManySync so
+-- both syncPet (render + label) and the weapon panel (highlight) can listen. Re-sent on every card
+-- pick, so levels never go stale.
+event Weapons {
+    From: Server,
+    Type: Reliable,
+    Call: ManySync,
+    Poll: false,
+    Data: WeaponInfo[]
+}
+
+-- Server → one player: every weapon id the player OWNS (equipped + benched) for the panel.
+event Unlocked {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: string[]
+}
+
+-- Client → server: the desired equipped set (≤10, must be owned).
+event SwitchWeapons {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: string[]
+}
+
+-- Client → server: pick the STARTER pet (by id) to play as — your main, the only weapon you begin
+-- a run with and the only one with a usable skill. Menu-only (rejected mid-run).
+event SetMain {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: string
+}
+
+-- Client → server: buy a locked pet with Tix (the menu pet-tab shop). Data = pet id. Server
+-- validates the balance, deducts, and unlocks the collection.
+event BuyPet {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: string
+}
+
+-- Server → one player: the player's owned passive ITEMS + levels (for the item tab + HUD list).
+-- ManySync: both the item tab and the in-run HUD listen.
+struct ItemMsg {
+    id: string,
+    level: u8,
+}
+event Items {
+    From: Server,
+    Type: Reliable,
+    Call: ManySync,
+    Poll: false,
+    Data: ItemMsg[]
+}
+
+-- Server → one player: the current MAIN weapon slot index (skillbar shows that weapon's skill).
+-- ManySync: the skill bar (skillbar) AND the weapon-slot HUD (playerhud) both track the main slot.
+event MainWeapon {
+    From: Server,
+    Type: Reliable,
+    Call: ManySync,
+    Poll: false,
+    Data: u8
+}
+
+-- One-shot combat visual. kind: 1 = aura pulse, 2 = melee swing (arc = cone angle so the visual
+-- matches the hitbox), 3 = stone drop, 4 = tongue lash (narrow line along dir, length = radius),
+-- 5 = EXPLOSION (bee bombers / Rebirth / revive).
+struct EffectMsg {
+    kind: u8,
+    pos: vector<f32>,
+    radius: f32,
+    dir: vector<f32>,
+    arc: f16?,           -- melee cone angle (radians); nil for non-cone kinds
+    color: vector<f32>?, -- r,g,b 0..1 — the firing weapon's color; nil → the kind's default
+}
+
+event Effect {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: EffectMsg[]
+}
+
+-- Server → all: a persistent GROUND HAZARD (rainbow puddle / bamboo). The server owns the damage;
+-- the client just renders the visual at pos for `life` seconds (or until HazardRemove). `kind`:
+-- 1 = rainbow puddle (DoT+slow), 2 = bamboo stalk, 3 = giant bamboo.
+-- kind: 1 = rainbow puddle (unicorn), 2 = bamboo, 3 = giant bamboo, 4 = ice patch (penguin trail),
+-- 5 = ice WALL column (Glacier Wall — the server also registers a mob-blocking segment),
+-- 6 = milk puddle (cow splash — white, sticky slow)
+struct HazardMsg {
+    id: u32,
+    kind: u8,
+    pos: vector<f32>,
+    radius: f32,
+    life: f32,
+}
+
+-- A summoned entity (bee Hive turret / wolf spirits): FORMULA position — the client computes
+-- pos = origin + velocity*(now - t0) and despawns after `life` (SummonRemove for early clears).
+-- kind: 1 = hive turret, 2 = spirit wolf.
+struct SummonMsg {
+    id: u32,
+    kind: u8,
+    origin: vector<f32>,
+    velocity: vector<f32>,
+    t0: f64,
+    life: f32,
+}
+event SummonSpawn {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: SummonMsg[]
+}
+event SummonRemove {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u32[]
+}
+event HazardSpawn {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: HazardMsg[]
+}
+event HazardRemove {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u32[]
+}
+
+-- Server → one player: their unicorn ult beam ("Taste the Rainbow"). The OWNER renders a sweeping
+-- rainbow beam from their character along their LOCAL aim for `life`s; the server does the damage
+-- authoritatively from the streamed aim. active 1 = start, 0 = stop.
+struct BeamState {
+    active: u8,
+    life: f32,
+    width: f32,
+    length: f32,
+}
+event UltBeam {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: BeamState
+}
+
+-- Server → all: a new wave started (client shows a banner).
+event WaveStart {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u16
+}
+
+-- Server → one player: progression HUD update.
+-- ManySync: BOTH the top-right stats panel (playerhud) AND the on-screen health/EXP bars (syncCards)
+-- listen. SingleSync would drop one (load-order dependent → updates one HUD in Studio, the other live).
+event Stats {
+    From: Server,
+    Type: Reliable,
+    Call: ManySync,
+    Poll: false,
+    Data: StatsMsg
+}
+
+-- Server → all: mob ids that took damage this tick. Cosmetic hit-flash; unreliable (drops ok).
+-- ManySync: zombies (syncMobs) AND UFOs (syncUFO) both flash whichever ids are theirs.
+event Hit {
+    From: Server,
+    Type: Unreliable,
+    Call: ManySync,
+    Poll: false,
+    Data: u32[]
+}
+
+-- Server → one player: a short banner message (e.g. "New pet: Bear!").
+event Toast {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: string
+}
+
+-- A pet pickup dropped by a slain boss. Static; Y already resolved to the floor. `pet` is the
+-- registry id (axolotl/fox/...) so the client knows which animal model to float + spin.
+struct PetDrop {
+    id: u32,
+    pos: vector<f32>,
+    pet: string,
+}
+
+event PetDropSpawn {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: PetDrop[]
+}
+
+-- Pet pickups that were collected/removed (client despawns their model).
+event PetDropRemove {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u32[]
+}
+
+-- A boss/elite-dropped CARD PACK pickup (Assets.Card model). Static; Y resolved to the floor.
+-- Walk over it (server proximity) → the server opens a choice of 2-4 upgrade cards (LevelUp).
+struct CardDrop {
+    id: u32,
+    pos: vector<f32>,
+}
+
+event CardDropSpawn {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: CardDrop[]
+}
+
+-- Card packs that were collected/removed (client despawns their model).
+event CardDropRemove {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u32[]
+}
+
+-- A health (Heart) pickup dropped by a slain mob. Static; Y already resolved to the floor.
+struct HealthDrop {
+    id: u32,
+    pos: vector<f32>,
+}
+
+event HealthSpawn {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: HealthDrop[]
+}
+
+-- Health pickups that were collected/removed (client despawns their model).
+event HealthRemove {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u32[]
+}
+
+-- A Tix currency pickup dropped by a slain mob. `kind` is the Assets model name
+-- ("Tix" / "PileofTix" / "StackofTix") = the visual tier. Static; Y resolved to the floor.
+struct TixDrop {
+    id: u32,
+    pos: vector<f32>,
+    amount: u32,    -- tix value; client picks the model (≤5 Tix, ≤20 PileofTix, else StackofTix)
+}
+
+event TixSpawn {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: TixDrop[]
+}
+
+-- Tix pickups collected/removed (client despawns their model).
+event TixRemove {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: u32[]
+}
+
+-- Server → one player: their current Tix balance (meta currency, survives a run restart).
+event TixCount {
+    From: Server,
+    Type: Reliable,
+    Call: ManySync,
+    Poll: false,
+    Data: u32
+}
+
+-- Server → one player: their PERSISTED profile (DataStore). tix + lifetime/best stats. Sent on
+-- join (after load) and after a run ends (best stats may have changed).
+struct ProfileMsg {
+    tix: u32,
+    bestWave: u16,
+    bestLevel: u16,
+    bestTime: u32,    -- best survival, seconds
+    totalKills: u32,
+    runs: u32,
+}
+
+event Profile {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: ProfileMsg
+}
+
+-- ── UFO flying enemy (ufo.luau) ──────────────────────────────────────────────────
+-- UFOs spawn via the shared Spawn event (type "UFO", size = scale). They move via their own
+-- stream (UfoMove) since they ignore the path/horde, and attack at range.
+
+-- Server → all: UFO positions. f16 is plenty — the map sits near origin (|coord| < ~200, so
+-- f16 ULP < ~0.13 studs) and the client lerps toward these anyway. Halves the position payload.
+struct UfoPos {
+    id: u32,
+    pos: vector<f16>,
+}
+event UfoMove {
+    From: Server,
+    Type: Unreliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: UfoPos[]
+}
+
+-- Server → all: a UFO laser bolt (normal attack). Formula motion pos = origin + vel*(now-t0),
+-- computed both ends; server sims it vs players for authoritative damage. Client just renders.
+struct UfoBolt {
+    origin: vector<f32>,
+    vel: vector<f32>,
+    t0: f64,
+    life: f32,
+}
+event UfoFire {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: UfoBolt[]
+}
+
+-- Server → all: continuous beams (elite/boss UFOs). One entry per active beam this tick: the
+-- UFO id + the beam's current endpoint (lags the player). No entry → that UFO's beam is off.
+struct UfoBeamMsg {
+    id: u32,
+    target: vector<f16>,  -- f16: endpoint near origin + client-lerped, so precision is ample
+    charging: u8,         -- 1 = TELEGRAPH (warning line, no damage yet), 0 = firing (damaging)
+}
+event UfoBeam {
+    From: Server,
+    Type: Unreliable,
+    Call: SingleSync,
+    Poll: false,
+    Data: UfoBeamMsg[]
+}

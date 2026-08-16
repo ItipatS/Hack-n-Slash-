@@ -1,0 +1,39 @@
+{
+  "name": "Hack&Slash",
+  "tree": {
+    "$className": "DataModel",
+    "$ignoreUnknownInstances": true,
+    "ReplicatedStorage": {
+      "$ignoreUnknownInstances": true,
+      "Packages": {
+        "$path": "Packages"
+      },
+      "ecs": {
+        "$path": "src/jecs.luau"
+      },
+      "Logger": {
+        "$path": "src/Logger.luau"
+      },
+      "std": {
+        "$path": "src/std"
+      },
+      "ClientSystems": {
+        "$path": "src/ClientSystems"
+      },
+      "Framework": {
+          "$path": "src/Framework"
+        }
+    },
+    "ServerScriptService": {
+      "$ignoreUnknownInstances": true,
+      "$path": "src/ServerScriptService"
+    },
+    "StarterPlayer": {
+      "$ignoreUnknownInstances": true,
+      "StarterPlayerScripts": {
+        "$ignoreUnknownInstances": true,
+        "$path": "src/StarterPlayer/StarterPlayerScripts"
+      }
+    }
+  }
+}

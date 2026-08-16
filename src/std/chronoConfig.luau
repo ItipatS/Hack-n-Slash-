@@ -1,0 +1,30 @@
+-- std/chronoConfig.luau — TOMBSTONE. Chrono is REMOVED from the project; nothing requires this module.
+-- Kept only so the decision trail survives a context clear. Safe to delete once the Packages/chrono
+-- dependency is pruned from wally.toml.
+--
+-- WHY CHRONO EXISTED: CLAUDE.md's bet was "unshackle Roblox's default replication" — the problem was
+-- REPLICATION UNPREDICTABILITY (mushy default ~20Hz + a fixed mobile interp delay), NOT authority. Chrono
+-- solved that with its own transport (Camera+Weld locker to suppress Roblox replication + clock-synced
+-- interpolation + snapshot history for lag comp).
+--
+-- WHY IT'S GONE — it lost both of its jobs, in order:
+--   1. MOBS (iter 6): Chrono's general-purpose format cost 16 bytes/mob at a flat 20Hz with no LOD
+--      (~160 KB/s per player at 500 mobs) — it doesn't scale to the horde target. Mobs moved to our own
+--      Blink dense-slot i8-delta lane (~3 bytes/mob, ~26 KB/s at 500). See systems/mobs + config.luau Net.
+--   2. PLAYERS (iter 7): Roblox shipped **Server Authority** (full release, Jul 2026). Turning on
+--      `Workspace.AuthorityMode = "Server"` gives NextGenerationReplication natively PLUS client
+--      prediction + rollback/resimulation — precisely the "whole second hard project" CLAUDE.md said we
+--      were deliberately skipping. The engine now does what Chrono did, better, for free.
+--
+-- It was also ACTIVELY HARMFUL once Server Authority was on: `NATIVE_WITH_LOCK` welds the character under
+-- a Camera to suppress Roblox replication, which fights the server-authoritative character — the
+-- "can't move my character" symptom.
+--
+-- NOTE: `AuthorityMode = "Server"` also force-enables NextGenerationReplication,
+-- PlayerScriptsUseInputActionSystem, SignalBehavior=Deferred, StreamingEnabled and UseFixedSimulation.
+-- Those have real consequences for THIS codebase (input must go through the InputAction system; the
+-- camera moves to Player:GetCameraState(); custom ability logic must run identically on BOTH ends inside
+-- RunService:BindToSimulation(); cached AnimationTrack handles are invalidated by rollback). See
+-- docs/IMPLEMENTATION.md.
+
+return nil
