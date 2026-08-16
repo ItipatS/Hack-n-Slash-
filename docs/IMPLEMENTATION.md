@@ -1,8 +1,10 @@
 # Hack&Slash — Implementation Status
 
-**What this documents:** the CURRENT built state of the pivot (as of 2026-08-16, through iter 13 — ground/wall
+**What this documents:** the CURRENT built state of the pivot (as of 2026-08-17, through iter 13 — ground/wall
 detection, client crowd perf, arrival/hold-back, and a full gameplay layer: waves, damage numbers, mob health
-bars, mob→player attacks, XP + level-up cards, real upgrade effects, a real pause). `CLAUDE.md` describes the *target* design and
+bars, mob→player attacks, XP + level-up cards, real upgrade effects, a real pause — plus an Aug-2026
+legacy-prune: the navmesh subsystem, the imported UI/data Framework, and dead vampire-survivors modules
+were removed from the tree). `CLAUDE.md` describes the *target* design and
 is partly aspirational; THIS file describes what actually exists in code. When they disagree, this file wins
 for "what's implemented," CLAUDE.md wins for "what we're aiming at."
 
@@ -25,8 +27,9 @@ for "what's implemented," CLAUDE.md wins for "what we're aiming at."
 >    for the near/collision-critical mobs is viable (open design call, not yet taken).
 
 The repo is the old vampire-survivors horde game being rebuilt into a **Devil-May-Cry-like hack & slash**.
-Roughly half the old systems remain usable (ECS/jecs, scheduler/phases, Blink, drops/meta); the horde
-streaming machinery is parked in `_legacy/` folders (NOT loaded — the `start()` loader skips them).
+Roughly half the old systems remain usable (ECS/jecs, scheduler/phases, Blink); the unused old code —
+the `_legacy/` folders, an imported UI/data Framework, a navmesh subsystem, and dead `std/` leftovers —
+was pruned in an Aug-2026 cleanup pass (it lives in git history if ever needed).
 
 ---
 
@@ -34,11 +37,10 @@ streaming machinery is parked in `_legacy/` folders (NOT loaded — the `start()
 
 - **Server** `ServerScriptService/main.server.luau` — staged boot, each stage prints `[boot +Ns]`:
   1. wait for `Packages`
-  2. `std.Nav.init()` (navmesh parked; `USE_NAVMESH=false` → hand-painted PathData)
-  3. Framework data layer (ProfileStore)
-  4. *(was Chrono — REMOVED, see Replication)*
-  5. `start(systems)` — requires every `systems/*.luau`, which creates the Blink remotes + `CombatRemote`
-  6. sets `ReplicatedStorage.ServerReady` → clients may init
+  2. `start(systems)` — requires every `systems/*.luau`, which creates the Blink remotes + `CombatRemote`
+  3. sets `ReplicatedStorage.ServerReady` → clients may init
+  - *(Three earlier boot stages were removed in the Aug-2026 prune: a navmesh bake (`std.Nav.init()`),
+    an imported-Framework/ProfileStore data layer, and Chrono. None related to the current game.)*
 - **Client** `StarterPlayer/StarterPlayerScripts/main.client.luau` — polls for `ServerReady`, then
   `start(ClientSystems)`.
 - `std/start.luau` requires each ModuleScript in the folder, then `scheduler.COLLECT()` + `scheduler.BEGIN()`.
@@ -57,7 +59,7 @@ streaming machinery is parked in `_legacy/` folders (NOT loaded — the `start()
    *replication unpredictability* (mushy default 20 Hz + fixed mobile interp delay); the engine now does
    that, better, for free. It was also actively **harmful**: `NATIVE_WITH_LOCK` welds the character under a
    Camera to suppress Roblox replication, which fights a server-authoritative character (**symptom: the
-   character can't move**). `std/chronoConfig.luau` is now a tombstone; nothing requires it.
+   character can't move**). `std/chronoConfig.luau` (a tombstone nothing required) was deleted in the cleanup.
 
 **Server Authority** is opt-in via `Workspace.AuthorityMode = "Server"`, which force-enables
 `NextGenerationReplication`, `PlayerScriptsUseInputActionSystem`, `SignalBehavior=Deferred`,
@@ -373,7 +375,7 @@ except the wave director (server).
   Fed from `combat.fireHit`: `Style.addHit(attackNum, heavy, hitCount)`.
 - **Wave loop** — server director in `systems/mobs.luau` (`mobConfig.WAVE`) + `ClientSystems/waveHud.luau`.
   `spawning → fighting → breather → next (bigger) wave`, spawned scattered around a player via `spawnMob`,
-  reusing the OLD `_legacy/SpawnMob` DESIGN against the NEW Blink pipeline. `liveCount`/`killCount` counters
+  reusing the OLD SpawnMob wave DESIGN (that file since pruned) against the NEW Blink pipeline. `liveCount`/`killCount` counters
   (spawn/despawn) drive the HUD; state pushed over CombatRemote `"wave"` at `WAVE.BCAST`. Toggled by the dev
   panel **▶ Start Waves** button (`"waves"` event); the panel also gained one-click 100/500/1k/2k presets.
 - **Hit path summary:** `combat.fireHit` → `Mobs.playImpacts(cf,…,heavy,damage)` (impact FX + damage numbers,
@@ -464,7 +466,6 @@ except the wave director (server).
 - **`std/fx.luau`** — the client one-shot VFX/SFX helper (name-resolved, warn-once, Debris-cleaned).
 - **`std/animConfig.luau`** — player anim sets + shared reaction clips (idle, walk/run F/B/L/R, jump,
   fall, land, roll, hit1..5, knockdown, knockdownloop). Also player feel/camera/input tunables.
-- **`std/chronoConfig.luau`** — PLAYER / MOB entity types.
 
 ### Tuning notes
 - Rig floating → `mobConfig.FOOT_OFFSET` (and confirm the `[mobs] rig root part = '...'` print names the
@@ -517,8 +518,7 @@ except the wave director (server).
 ## Testing
 
 - **2-player local server** (Studio → Test → 2 players). Watch Output:
-  - `[boot +Ns]` stages, `[chrono] server/client ...` (player replication), `[mobs] rig root part = ...`,
-    `[mobs] spawned N ...`.
+  - `[boot +Ns]` stages, `[mobs] rig root part = ...`, `[mobs] spawned N ...`.
 - **Dev panel** (Studio) to spawn/clear packs on demand.
 - **`mobConfig.DEBUG_NET = true`** → once/sec seam prints on BOTH ends. This is the first thing to flip when
   mobs misbehave — it isolates which of the three layers is at fault without guessing:
@@ -542,7 +542,7 @@ except the wave director (server).
   arrival ranks + confirm FPS holds at 1–2 k.** Open perf levers if needed: bulk-move only dirty roots;
   skinned-MeshPart rig (1 object vs ~15 parts).
 - **Custom mob Blink lane — DONE (iter 6).** Mobs now stream on our dense-slot i8-delta lane (~26 KB/s at
-  500) with render-LOD; players stay on Chrono. Remaining hardening on it:
+  500) with render-LOD; players ride Roblox Server Authority. Remaining hardening on it:
   - **Verify bandwidth empirically** (Studio F9 network / `Stats`) at 500 mobs; confirm the ~26 KB/s target.
   - **netId is a monotonic u32** (fine for a prototype; wraps after 4 B spawns). Slot is u16 (≤65535 live).
   - **Late-join / cross-channel:** `Spawn`/`Death` are reliable-ordered, but `mobdeath` (CombatRemote) vs a
@@ -572,7 +572,8 @@ except the wave director (server).
   driven off the streamed CFrame/velocity).
 - Migrate `CombatRemote` → a Blink lane (`Net.blink`) instead of a raw RemoteEvent.
 - **True ragdoll** death (replace Motor6D with sockets) instead of the rigid-body fling.
-- **Lag-comp rewind** for hitreg (Chrono exposes snapshot history via `Entity.GetAt`).
+- **Lag-comp rewind** for hitreg — would need our own mob snapshot-history ring (Chrono, which exposed
+  this, has been removed).
 - **Ground/wall detection — DONE as a raw-map first pass (iter 10).** Gated ground re-cast + wall shapecast
   against real geometry (see the Mobs GROUND/WALL section). **Next major step: the simplified collision
   shell** (CLAUDE.md keystone) — invisible clean boxes/wedges mobs sweep instead of raw visual geometry:
