@@ -136,7 +136,7 @@ What a reviewer should take from it, independent of Roblox:
 
 - **Prototype, actively developed.** It's a pivot from a prior Vampire-Survivors-style horde game,
   reusing the scale-engineering "bones" (ECS, networking, rendering) for a new combat direction; the
-  old systems are parked in `_legacy/` for reference.
+  old game's systems have been pruned from the tree (they remain in git history).
 - Performance is validated in Studio (server + client on one machine); the scale target is *hundreds
   of living mobs at 60 FPS*, and some tuning is still per-playtest rather than load-tested with
   multiple live clients.

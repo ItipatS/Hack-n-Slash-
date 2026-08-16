@@ -1,6 +1,6 @@
 -- ServerScriptService/main.server.luau
 -- Explicit server BOOT ORDER. Each shared dependency is fully resolved before the next, so systems
--- never race a half-ready singleton. Order: packages -> navmesh -> framework -> game systems.
+-- never race a half-ready singleton. Order: packages -> framework -> game systems.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Each stage prints so the boot is OBSERVABLE in the Output — if it ever stalls, the last [boot] line
@@ -10,23 +10,17 @@ local function boot(msg: string) print(("[boot +%.1fs] %s"):format(os.clock() - 
 
 -- 1) PACKAGES — wait for the wally tree so anything that requires a package (profilestore, bytenet,
 --    jecs, …) finds it. (Server has the tree at boot; WaitForChild is the explicit gate.)
-boot("1/5 waiting for Packages …")
+boot("1/4 waiting for Packages …")
 ReplicatedStorage:WaitForChild("Packages")
-boot("1/5 Packages ready")
+boot("1/4 Packages ready")
 
--- 2) NAVMESH — resolve the pathfinding graph. With USE_NAVMESH on this BAKES from workspace.Map and
---    yields; doing it here means the graph is ready before the horde (or any system) loads, so mobs
---    always have a navmesh to path on. No-op'd fast when the flag is off (uses hand-painted PathData).
-boot("2/5 navmesh (bakes when USE_NAVMESH) …")
-require(ReplicatedStorage.std.Nav).init()
-
--- 3) FRAMEWORK — initialize the imported data layer (the require runs Data._init(), which creates the
+-- 2) FRAMEWORK — initialize the imported data layer (the require runs Data._init(), which creates the
 --    ProfileStore store) so a player profile load can never race the store's creation. (Data-layer
 --    scope only; if the full framework is ever adopted, Framework.Initialize() would go here too.)
-boot("3/6 framework data layer …")
+boot("2/4 framework data layer …")
 require(ReplicatedStorage.Framework.Data)
 
--- 4) (was CHRONO — REMOVED.) Chrono is gone from the project entirely.
+-- (was CHRONO — REMOVED.) Chrono is gone from the project entirely.
 --    Two things killed it, in order:
 --      • MOBS left first — Chrono's general-purpose 16 bytes/mob @ flat 20Hz didn't scale to the horde
 --        target; they now ride our own Blink dense-slot i8 lane (~3 bytes/mob). See systems/mobs.
@@ -39,14 +33,14 @@ require(ReplicatedStorage.Framework.Data)
 --    Enabled via Workspace.AuthorityMode = "Server" (auto-sets NextGenerationReplication,
 --    PlayerScriptsUseInputActionSystem, SignalBehavior=Deferred, StreamingEnabled, UseFixedSimulation).
 
--- 5) SYSTEMS — dependencies are ready; start the game loop. This also requires every system module,
+-- 3) SYSTEMS — dependencies are ready; start the game loop. This also requires every system module,
 --    which is where the Blink remotes (ServerNet) and any server-built ReplicatedStorage instances get
 --    created — so once start() returns, everything a client depends on EXISTS.
-boot("5/6 starting systems …")
+boot("3/4 starting systems …")
 local start = require(ReplicatedStorage.std.start)
 start(script.Parent:WaitForChild("systems"):GetChildren())
 
--- 5) SIGNAL CLIENTS — only now is the server fully built (remotes + instances + systems). Clients gate
+-- 4) SIGNAL CLIENTS — only now is the server fully built (remotes + instances + systems). Clients gate
 --    their own init on this flag so they never race a half-built server (the client-starts-first bug:
 --    a client touching a remote/instance the server hasn't created yet). A PERSISTENT instance, so a
 --    late joiner sees it immediately rather than needing a re-fired event.
@@ -54,4 +48,4 @@ local ready = Instance.new("BoolValue")
 ready.Name = "ServerReady"
 ready.Value = true
 ready.Parent = ReplicatedStorage
-boot("6/6 ServerReady set → clients may init")
+boot("4/4 ServerReady set → clients may init")
