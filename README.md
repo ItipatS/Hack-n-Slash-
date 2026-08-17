@@ -7,7 +7,7 @@ gameplay is real, but the point is the systems underneath: *can Roblox actually 
 server-authoritative horde at 60 FPS if you stop using it the idiomatic way?*
 
 Demo - https://www.roblox.com/games/105505593419604/Hackn-Slash
-
+- **Video:** [![Watch the video](https://img.youtube.com/vi/ja5mQSyd69g/0.jpg)](https://youtu.be/ja5mQSyd69g)
 > **Why it's in a portfolio — read past "it's Roblox."** The engine is just the runtime. Everything
 > hard here is platform-agnostic **systems engineering**: a data-oriented ECS, a custom
 > buffer-packed replication protocol, spatial-hash broad-phase, render LOD + instance pooling,
