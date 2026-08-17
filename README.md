@@ -1,10 +1,12 @@
 # Hack & Slash — a scale-engineered Roblox horde prototype
 
-A **Devil-May-Cry-style hit-and-slash PvE horde game**: fluid melee combat against **hundreds of
+A **Devil-May-Cry-style hit-and-slash PvE horde game**: fluid melee combat against **thousands of
 living, networked enemies** on screen, with a survive-the-horde loop (waves, XP, level-up upgrade
 cards) and satisfying ragdoll deaths. It's a **prototype built to validate the engineering** — the
 gameplay is real, but the point is the systems underneath: *can Roblox actually run a large,
 server-authoritative horde at 60 FPS if you stop using it the idiomatic way?*
+
+Demo - https://www.roblox.com/games/105505593419604/Hackn-Slash
 
 > **Why it's in a portfolio — read past "it's Roblox."** The engine is just the runtime. Everything
 > hard here is platform-agnostic **systems engineering**: a data-oriented ECS, a custom
